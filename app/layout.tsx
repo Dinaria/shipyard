@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import AgentationDevToolbar from "../components/AgentationDevToolbar";
 import "./globals.css";
 
 const inter = Inter({
@@ -35,6 +36,7 @@ export default function RootLayout({
         className={`${inter.variable} bg-[#0a0a0a] text-[#e5e5e5] antialiased min-h-screen`}
       >
         {children}
+        <AgentationDevToolbar />
       </body>
     </html>
   );

@@ -1,8 +1,6 @@
 import Header from "../components/Header";
 import ProjectCard from "../components/ProjectCard";
-import type { Project, DeployStatus } from "../types";
-
-// ---------- GitHub types & fetching ----------
+import type { DeployStatus, Project } from "../types";
 
 type GithubProject = {
   name: string;
@@ -39,7 +37,56 @@ type GitHubCommitActivityWeek = {
   days: number[];
 };
 
+type VercelDeploymentStatus =
+  | "READY"
+  | "BUILDING"
+  | "ERROR"
+  | "QUEUED"
+  | "CANCELED";
+
+type RawVercelDeployment = {
+  name: string;
+  url?: string;
+  createdAt: number | string;
+  readyState: VercelDeploymentStatus | string;
+};
+
+type VercelDeployment = {
+  name: string;
+  status: VercelDeploymentStatus;
+  url: string | null;
+  createdAt: string;
+};
+
+type VercelDeploymentMap = Record<string, VercelDeployment>;
+
 const GITHUB_API_BASE = "https://api.github.com";
+const VERCEL_API_BASE = "https://api.vercel.com";
+
+type ProjectWithActivity = Project & { lastActivityAt: string };
+
+function formatTimeAgo(isoDate: string): string {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) return "unknown";
+
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = Math.max(1, Math.round(diffMs / 60000));
+
+  if (diffMinutes < 60) return `${diffMinutes} min ago`;
+
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hours ago`;
+
+  const diffDays = Math.round(diffHours / 24);
+  return `${diffDays} days ago`;
+}
+
+function mapDeploymentStatus(status: VercelDeploymentStatus): DeployStatus {
+  if (status === "READY") return "READY";
+  if (status === "BUILDING" || status === "QUEUED") return "BUILDING";
+  if (status === "ERROR" || status === "CANCELED") return "ERROR";
+  return null;
+}
 
 async function fetchLatestCommit(
   owner: string,
@@ -55,20 +102,14 @@ async function fetchLatestCommit(
           Accept: "application/vnd.github+json",
           "User-Agent": "shipyard-dashboard",
         },
-        // Let Next.js cache via fetch caching / route caching if desired.
       },
     );
 
-    if (!res.ok) {
-      return null;
-    }
+    if (!res.ok) return null;
 
     const commits = (await res.json()) as GitHubCommit[];
     const latest = commits[0];
-
-    if (!latest) {
-      return null;
-    }
+    if (!latest) return null;
 
     return {
       message: latest.commit.message,
@@ -80,10 +121,7 @@ async function fetchLatestCommit(
   }
 }
 
-async function fetchCommitActivity(
-  owner: string,
-  repo: string,
-): Promise<number[]> {
+async function fetchCommitActivity(owner: string, repo: string): Promise<number[]> {
   try {
     const res = await fetch(
       `${GITHUB_API_BASE}/repos/${encodeURIComponent(
@@ -97,20 +135,13 @@ async function fetchCommitActivity(
       },
     );
 
-    if (!res.ok) {
-      return [];
-    }
+    if (!res.ok) return [];
 
     const weeks = (await res.json()) as GitHubCommitActivityWeek[];
-
-    if (!Array.isArray(weeks) || weeks.length === 0) {
-      return [];
-    }
+    if (!Array.isArray(weeks) || weeks.length === 0) return [];
 
     const allDays = weeks.flatMap((week) => week.days ?? []);
-    const last30Days = allDays.slice(-30);
-
-    return last30Days;
+    return allDays.slice(-30);
   } catch {
     return [];
   }
@@ -118,10 +149,7 @@ async function fetchCommitActivity(
 
 async function fetchGithubProjects(): Promise<GithubProject[]> {
   const username = process.env.GITHUB_USERNAME;
-
-  if (!username) {
-    return [];
-  }
+  if (!username) return [];
 
   try {
     const reposRes = await fetch(
@@ -136,13 +164,11 @@ async function fetchGithubProjects(): Promise<GithubProject[]> {
       },
     );
 
-    if (!reposRes.ok) {
-      return [];
-    }
+    if (!reposRes.ok) return [];
 
     const repos = (await reposRes.json()) as GitHubRepo[];
 
-    const projects: GithubProject[] = await Promise.all(
+    return await Promise.all(
       repos.map(async (repo) => {
         const owner = repo.owner?.login ?? username;
         const repoName = repo.name;
@@ -164,39 +190,10 @@ async function fetchGithubProjects(): Promise<GithubProject[]> {
         };
       }),
     );
-
-    return projects;
   } catch {
     return [];
   }
 }
-
-// ---------- Vercel types & fetching ----------
-
-type VercelDeploymentStatus =
-  | "READY"
-  | "BUILDING"
-  | "ERROR"
-  | "QUEUED"
-  | "CANCELED";
-
-type VercelDeployment = {
-  name: string;
-  status: VercelDeploymentStatus;
-  url: string | null;
-  createdAt: string;
-};
-
-type RawVercelDeployment = {
-  name: string;
-  url?: string;
-  createdAt: number | string;
-  readyState: VercelDeploymentStatus | string;
-};
-
-type VercelDeploymentMap = Record<string, VercelDeployment>;
-
-const VERCEL_API_BASE = "https://api.vercel.com";
 
 function normalizeCreatedAt(value: number | string): number {
   if (typeof value === "number") return value;
@@ -204,7 +201,9 @@ function normalizeCreatedAt(value: number | string): number {
   return Number.isNaN(parsed) ? Date.now() : parsed;
 }
 
-function normalizeStatus(state: RawVercelDeployment["readyState"]): VercelDeploymentStatus {
+function normalizeVercelStatus(
+  state: RawVercelDeployment["readyState"],
+): VercelDeploymentStatus {
   switch (state) {
     case "READY":
       return "READY";
@@ -223,10 +222,7 @@ function normalizeStatus(state: RawVercelDeployment["readyState"]): VercelDeploy
 
 async function fetchVercelDeployments(): Promise<VercelDeploymentMap> {
   const token = process.env.VERCEL_TOKEN;
-
-  if (!token) {
-    return {};
-  }
+  if (!token) return {};
 
   try {
     const res = await fetch(`${VERCEL_API_BASE}/v6/deployments?limit=50`, {
@@ -236,70 +232,33 @@ async function fetchVercelDeployments(): Promise<VercelDeploymentMap> {
       },
     });
 
-    if (!res.ok) {
-      return {};
-    }
+    if (!res.ok) return {};
 
     const json = (await res.json()) as { deployments?: RawVercelDeployment[] };
     const deployments = json.deployments ?? [];
 
-    const latestByProject = deployments.reduce<VercelDeploymentMap>(
-      (acc, d) => {
-        if (!d.name) return acc;
+    return deployments.reduce<VercelDeploymentMap>((acc, d) => {
+      if (!d.name) return acc;
 
-        const createdAtMs = normalizeCreatedAt(d.createdAt);
-        const existing = acc[d.name];
+      const createdAtMs = normalizeCreatedAt(d.createdAt);
+      const existing = acc[d.name];
 
-        if (!existing || createdAtMs > Date.parse(existing.createdAt)) {
-          const status = normalizeStatus(d.readyState);
+      if (!existing || createdAtMs > Date.parse(existing.createdAt)) {
+        const status = normalizeVercelStatus(d.readyState);
+        acc[d.name] = {
+          name: d.name,
+          status,
+          url: d.url ?? null,
+          createdAt: new Date(createdAtMs).toISOString(),
+        };
+      }
 
-          acc[d.name] = {
-            name: d.name,
-            status,
-            url: d.url ?? null,
-            createdAt: new Date(createdAtMs).toISOString(),
-          };
-        }
-
-        return acc;
-      },
-      {},
-    );
-
-    return latestByProject;
+      return acc;
+    }, {});
   } catch {
     return {};
   }
 }
-
-function mapDeploymentStatus(status: VercelDeploymentStatus): DeployStatus {
-  if (status === "READY") return "READY";
-  if (status === "BUILDING" || status === "QUEUED") return "BUILDING";
-  if (status === "ERROR" || status === "CANCELED") return "ERROR";
-  return null;
-}
-
-function formatTimeAgo(isoDate: string): string {
-  const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) return "unknown";
-
-  const diffMs = Date.now() - date.getTime();
-  const diffMinutes = Math.max(1, Math.round(diffMs / 60000));
-
-  if (diffMinutes < 60) {
-    return `${diffMinutes} min ago`;
-  }
-
-  const diffHours = Math.round(diffMinutes / 60);
-  if (diffHours < 24) {
-    return `${diffHours} hours ago`;
-  }
-
-  const diffDays = Math.round(diffHours / 24);
-  return `${diffDays} days ago`;
-}
-
-type ProjectWithActivity = Project & { lastActivityAt: string };
 
 async function getProjects(): Promise<{
   projects: ProjectWithActivity[];
@@ -310,48 +269,35 @@ async function getProjects(): Promise<{
     fetchVercelDeployments(),
   ]);
 
-  const merged: ProjectWithActivity[] = githubProjects
+  const projects: ProjectWithActivity[] = githubProjects
     .slice()
     .sort(
       (a, b) =>
         new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
     )
     .map((proj) => {
-      const deployment = vercelDeployments?.[proj.name];
-
-      const deployStatus: DeployStatus = deployment
-        ? mapDeploymentStatus(deployment.status)
-        : null;
-
-      const lastCommitMessage =
-        proj.lastCommit?.message ?? "No commits yet";
+      const deployment = vercelDeployments[proj.name];
       const lastCommitDate = proj.lastCommit?.date ?? proj.updatedAt;
 
       return {
         name: proj.name,
         languages: proj.language ? [proj.language] : [],
-        lastCommit: lastCommitMessage,
+        lastCommit: proj.lastCommit?.message ?? "No commits yet",
         lastCommitAgo: formatTimeAgo(lastCommitDate),
-        deployStatus,
+        deployStatus: deployment ? mapDeploymentStatus(deployment.status) : null,
         deployUrl: deployment?.url ?? null,
-        commitActivity: Array.isArray(proj.commitActivity)
-          ? proj.commitActivity
-          : [],
+        commitActivity: Array.isArray(proj.commitActivity) ? proj.commitActivity : [],
         lastActivityAt: deployment?.createdAt ?? lastCommitDate,
       };
     });
 
-  const deploymentCount = Object.keys(vercelDeployments).length;
-
-  return { projects: merged, deploymentCount };
+  return { projects, deploymentCount: Object.keys(vercelDeployments).length };
 }
 
 export default async function Home() {
   const { projects: projectsWithActivity, deploymentCount } = await getProjects();
 
-  const projects: Project[] = projectsWithActivity;
-  const repoCount = projects.length;
-
+  const repoCount = projectsWithActivity.length;
   const lastActivityAt = projectsWithActivity.reduce<string | null>(
     (latest, proj) => {
       const currentTime = new Date(proj.lastActivityAt).getTime();
@@ -363,21 +309,17 @@ export default async function Home() {
     null,
   );
 
-  const lastActivityAgo = lastActivityAt
-    ? formatTimeAgo(lastActivityAt)
-    : "—";
-
   return (
     <main className="min-h-screen w-full bg-[#0a0a0a] px-4 pt-10 sm:px-8 sm:pt-16">
       <Header
         repoCount={repoCount}
         deploymentCount={deploymentCount}
-        lastActivityAgo={lastActivityAgo}
+        lastActivityAgo={lastActivityAt ? formatTimeAgo(lastActivityAt) : "—"}
       />
 
       <section className="mx-auto max-w-3xl">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {projects.map((project) => (
+          {projectsWithActivity.map((project) => (
             <ProjectCard key={project.name} project={project} />
           ))}
         </div>
