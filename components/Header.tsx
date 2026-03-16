@@ -1,4 +1,14 @@
-export default function Header() {
+type HeaderProps = {
+  repoCount: number;
+  deploymentCount: number;
+  lastActivityAgo: string;
+};
+
+export default function Header({
+  repoCount,
+  deploymentCount,
+  lastActivityAgo,
+}: HeaderProps) {
   return (
     <header className="mx-auto flex max-w-3xl items-center justify-between gap-2 pb-8">
       <div className="flex items-center gap-3 text-[1.3rem]">
@@ -9,15 +19,15 @@ export default function Header() {
       <div className="flex gap-5 text-sm font-mono">
         <div className="flex items-center gap-1 text-neutral-300">
           <span className="text-neutral-500">Repos:</span>{" "}
-          <span className="font-semibold text-white">6</span>
+          <span className="font-semibold text-white">{repoCount}</span>
         </div>
         <div className="flex items-center gap-1 text-neutral-300">
           <span className="text-neutral-500">Deploys:</span>{" "}
-          <span className="font-semibold text-white">23</span>
+          <span className="font-semibold text-white">{deploymentCount}</span>
         </div>
         <div className="flex items-center gap-1 text-neutral-300">
           <span className="text-neutral-500">Last:</span>{" "}
-          <span className="text-white">12 min ago</span>
+          <span className="text-white">{lastActivityAgo}</span>
         </div>
       </div>
     </header>

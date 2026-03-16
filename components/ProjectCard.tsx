@@ -4,24 +4,27 @@ import type { Project } from "../types";
 import StatusPill from "./StatusPill";
 import Sparkline from "./Sparkline";
 
-const baseSparkline: number[] = [
-  0, 1, 3, 2, 0, 5, 3, 1, 0, 0, 2, 4, 1, 0, 3, 2, 1, 0, 0, 1, 5, 7, 3, 2, 1, 0,
-  0, 2, 3, 1,
-];
-
-const sparklineByProject: Record<string, number[]> = {
-  shipyard: baseSparkline,
-  "my-portfolio": baseSparkline.map((v, i) => (i % 5 === 0 ? v + 1 : v)),
-  "vuln-triage": baseSparkline.map((v, i) => (i % 3 === 0 ? v + 2 : v)),
-  experiments: baseSparkline.map((v, i) => (i % 4 === 0 ? Math.max(0, v - 1) : v)),
-};
-
 type ProjectCardProps = {
   project: Project;
 };
 
 export default function ProjectCard({ project }: ProjectCardProps) {
-  const sparklineData = sparklineByProject[project.name] ?? baseSparkline;
+  const hasRealActivity =
+    Array.isArray(project.commitActivity) &&
+    project.commitActivity.some((value) => value > 0);
+
+  let sparklineData: number[];
+
+  if (hasRealActivity) {
+    const last30 = project.commitActivity.slice(-30);
+    const padded =
+      last30.length < 30
+        ? [...Array(30 - last30.length).fill(0), ...last30]
+        : last30;
+    sparklineData = padded;
+  } else {
+    sparklineData = Array(30).fill(0);
+  }
 
   return (
     <div className="bg-[#141414] border border-[#1e1e1e] rounded-lg p-4 transition hover:border-[#2e2e2e] flex flex-col gap-2">

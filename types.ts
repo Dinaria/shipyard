@@ -7,5 +7,6 @@ export type Project = {
   lastCommitAgo: string;
   deployStatus: DeployStatus;
   deployUrl: string | null;
+  commitActivity: number[];
 };
 
