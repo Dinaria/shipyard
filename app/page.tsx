@@ -2,12 +2,7 @@ import Header from "../components/Header";
 import ProjectCard from "../components/ProjectCard";
 import type { Project, DeployStatus } from "../types";
 
-function getApiBaseUrl(): string {
-  if (process.env.VERCEL_URL) {
-    return `https://${process.env.VERCEL_URL}`;
-  }
-  return `http://localhost:${process.env.PORT ?? 3000}`;
-}
+// ---------- GitHub types & fetching ----------
 
 type GithubProject = {
   name: string;
@@ -19,6 +14,164 @@ type GithubProject = {
   updatedAt: string;
   stars: number;
 };
+
+type GitHubRepo = {
+  name: string;
+  description: string | null;
+  html_url: string;
+  language: string | null;
+  owner: { login: string };
+  updated_at: string;
+  stargazers_count: number;
+};
+
+type GitHubCommit = {
+  commit: {
+    message: string;
+    author: {
+      name: string;
+      date: string;
+    };
+  };
+};
+
+type GitHubCommitActivityWeek = {
+  days: number[];
+};
+
+const GITHUB_API_BASE = "https://api.github.com";
+
+async function fetchLatestCommit(
+  owner: string,
+  repo: string,
+): Promise<GithubProject["lastCommit"]> {
+  try {
+    const res = await fetch(
+      `${GITHUB_API_BASE}/repos/${encodeURIComponent(
+        owner,
+      )}/${encodeURIComponent(repo)}/commits?per_page=1`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "shipyard-dashboard",
+        },
+        // Let Next.js cache via fetch caching / route caching if desired.
+      },
+    );
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const commits = (await res.json()) as GitHubCommit[];
+    const latest = commits[0];
+
+    if (!latest) {
+      return null;
+    }
+
+    return {
+      message: latest.commit.message,
+      date: latest.commit.author.date,
+      author: latest.commit.author.name,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCommitActivity(
+  owner: string,
+  repo: string,
+): Promise<number[]> {
+  try {
+    const res = await fetch(
+      `${GITHUB_API_BASE}/repos/${encodeURIComponent(
+        owner,
+      )}/${encodeURIComponent(repo)}/stats/commit_activity`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "shipyard-dashboard",
+        },
+      },
+    );
+
+    if (!res.ok) {
+      return [];
+    }
+
+    const weeks = (await res.json()) as GitHubCommitActivityWeek[];
+
+    if (!Array.isArray(weeks) || weeks.length === 0) {
+      return [];
+    }
+
+    const allDays = weeks.flatMap((week) => week.days ?? []);
+    const last30Days = allDays.slice(-30);
+
+    return last30Days;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchGithubProjects(): Promise<GithubProject[]> {
+  const username = process.env.GITHUB_USERNAME;
+
+  if (!username) {
+    return [];
+  }
+
+  try {
+    const reposRes = await fetch(
+      `${GITHUB_API_BASE}/users/${encodeURIComponent(
+        username,
+      )}/repos?sort=updated&per_page=12`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "shipyard-dashboard",
+        },
+      },
+    );
+
+    if (!reposRes.ok) {
+      return [];
+    }
+
+    const repos = (await reposRes.json()) as GitHubRepo[];
+
+    const projects: GithubProject[] = await Promise.all(
+      repos.map(async (repo) => {
+        const owner = repo.owner?.login ?? username;
+        const repoName = repo.name;
+
+        const [lastCommit, commitActivity] = await Promise.all([
+          fetchLatestCommit(owner, repoName),
+          fetchCommitActivity(owner, repoName),
+        ]);
+
+        return {
+          name: repo.name,
+          description: repo.description,
+          url: repo.html_url,
+          language: repo.language,
+          lastCommit,
+          commitActivity,
+          updatedAt: repo.updated_at,
+          stars: repo.stargazers_count,
+        };
+      }),
+    );
+
+    return projects;
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Vercel types & fetching ----------
 
 type VercelDeploymentStatus =
   | "READY"
@@ -34,37 +187,88 @@ type VercelDeployment = {
   createdAt: string;
 };
 
+type RawVercelDeployment = {
+  name: string;
+  url?: string;
+  createdAt: number | string;
+  readyState: VercelDeploymentStatus | string;
+};
+
 type VercelDeploymentMap = Record<string, VercelDeployment>;
 
-async function fetchGithubProjects(baseUrl: string): Promise<GithubProject[] | null> {
-  try {
-    const res = await fetch(`${baseUrl}/api/github`, {
-      method: "GET",
-    });
+const VERCEL_API_BASE = "https://api.vercel.com";
 
-    if (!res.ok) return null;
+function normalizeCreatedAt(value: number | string): number {
+  if (typeof value === "number") return value;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? Date.now() : parsed;
+}
 
-    const data = (await res.json()) as GithubProject[];
-    if (!Array.isArray(data)) return null;
-    return data;
-  } catch {
-    return null;
+function normalizeStatus(state: RawVercelDeployment["readyState"]): VercelDeploymentStatus {
+  switch (state) {
+    case "READY":
+      return "READY";
+    case "BUILDING":
+      return "BUILDING";
+    case "ERROR":
+      return "ERROR";
+    case "QUEUED":
+      return "QUEUED";
+    case "CANCELED":
+      return "CANCELED";
+    default:
+      return "ERROR";
   }
 }
 
-async function fetchVercelDeployments(baseUrl: string): Promise<VercelDeploymentMap | null> {
+async function fetchVercelDeployments(): Promise<VercelDeploymentMap> {
+  const token = process.env.VERCEL_TOKEN;
+
+  if (!token) {
+    return {};
+  }
+
   try {
-    const res = await fetch(`${baseUrl}/api/vercel`, {
-      method: "GET",
+    const res = await fetch(`${VERCEL_API_BASE}/v6/deployments?limit=50`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      return {};
+    }
 
-    const data = (await res.json()) as VercelDeploymentMap;
-    if (!data || typeof data !== "object") return null;
-    return data;
+    const json = (await res.json()) as { deployments?: RawVercelDeployment[] };
+    const deployments = json.deployments ?? [];
+
+    const latestByProject = deployments.reduce<VercelDeploymentMap>(
+      (acc, d) => {
+        if (!d.name) return acc;
+
+        const createdAtMs = normalizeCreatedAt(d.createdAt);
+        const existing = acc[d.name];
+
+        if (!existing || createdAtMs > Date.parse(existing.createdAt)) {
+          const status = normalizeStatus(d.readyState);
+
+          acc[d.name] = {
+            name: d.name,
+            status,
+            url: d.url ?? null,
+            createdAt: new Date(createdAtMs).toISOString(),
+          };
+        }
+
+        return acc;
+      },
+      {},
+    );
+
+    return latestByProject;
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -97,16 +301,14 @@ function formatTimeAgo(isoDate: string): string {
 
 type ProjectWithActivity = Project & { lastActivityAt: string };
 
-async function getProjects(): Promise<ProjectWithActivity[]> {
-  const baseUrl = getApiBaseUrl();
+async function getProjects(): Promise<{
+  projects: ProjectWithActivity[];
+  deploymentCount: number;
+}> {
   const [githubProjects, vercelDeployments] = await Promise.all([
-    fetchGithubProjects(baseUrl),
-    fetchVercelDeployments(baseUrl),
+    fetchGithubProjects(),
+    fetchVercelDeployments(),
   ]);
-
-  if (!githubProjects) {
-    return [];
-  }
 
   const merged: ProjectWithActivity[] = githubProjects
     .slice()
@@ -139,15 +341,16 @@ async function getProjects(): Promise<ProjectWithActivity[]> {
       };
     });
 
-  return merged;
+  const deploymentCount = Object.keys(vercelDeployments).length;
+
+  return { projects: merged, deploymentCount };
 }
 
 export default async function Home() {
-  const projectsWithActivity = await getProjects();
+  const { projects: projectsWithActivity, deploymentCount } = await getProjects();
 
   const projects: Project[] = projectsWithActivity;
   const repoCount = projects.length;
-  const deploymentCount = 0;
 
   const lastActivityAt = projectsWithActivity.reduce<string | null>(
     (latest, proj) => {
